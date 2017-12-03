@@ -1,0 +1,251 @@
+---
+title: "684 Midterm Project: Analyzing Baseball Data"
+author: "Elizabeth Morris"
+date: "12/2/2017"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load("ggplot2",
+  "lme4",
+  "tidyverse",
+  "RLRsim",
+  "lubridate",
+  "VGAM",
+  "MASS",
+  "arm",
+  "nnet"
+  )
+```
+
+#Overview  
+For this project I looked at baseball data from the Lahman database. This database consists of 27 different tables that contain information such as player performance, awards, colleges, and salaries; team statistics and performance; postseason results and performance; and hall of fame status. For the sake of this project, I focused on the information found in the batting, salaries, pitching, and fielding tables for individual players and the teams table for team performance/statistics. Questions I will be exploring in this project are as follows:  
+
+1. What player performance statistics are most predictive of player salaries?
+2. What team statistics are most predictive of a team making the playoffs?
+3. Can I predict a player's performance in his 7th year based on his performance during his first 6 years?  
+
+
+
+```{r, echo=FALSE}
+#reading in data
+batting <- read.csv('./Data/Lahman Data/core/Batting.csv')
+salaries <- read.csv('./Data/Lahman Data/core/Salaries.csv')
+pitching <- read.csv('./Data/Lahman Data/core/Pitching.csv')
+fielding <- read.csv('./Data/Lahman Data/core/Fielding.csv')
+master <- read.csv('./Data/Lahman Data/core/Master.csv')
+teams <- read.csv('./Data/Lahman Data/core/Teams.csv')
+```
+
+Not all statistics that I will need for my analyses are included in the tables given, so I calculated them using the information given.
+```{r} 
+#calculating number of singles
+batting$X1B <- batting$H - (batting$X2B + batting$X3B + batting$HR)
+
+#calculating slugging percentage, which gives a measure of how well a player hits for power
+batting$SLG <- ((batting$X1B) + (2 * batting$X2B) + (3 * batting$X3B) + (4*batting$HR))/batting$AB
+
+#calculating batting average-- how often a player gets a hit
+batting$AVG <- batting$H / batting$AB
+
+#calculating on base percentage-- how often a player gets on base
+batting$OBP <- (batting$H + batting$BB + batting$HBP) / (batting$AB + batting$BB + batting$HBP + batting$SF)
+
+#calculating OPS-- on base plus slugging
+batting$OPS <- batting$OBP + batting$SLG
+
+#calculating WHIP (walks + hits per inning pitched)
+pitching$WHIP <- (pitching$BB + pitching$H)/(pitching$IPouts/3)
+
+#getting the player's MLB debut year, birth year, and calculating age
+master$debut <- as.character(master$debut)
+debuts <- ymd(master$debut)
+master$debut <- ymd(master$debut)
+batting <- merge(batting, master[, c("playerID", "debut", "birthYear")], by = "playerID")
+batting$age <- batting$yearID - batting$birthYear
+batting$debutyear <- year(batting$debut)
+```
+
+#Salaries  
+
+**EDA**
+To start, I performed some EDA by plotting how much teams spend on average on a player as well as how much teams spend total on players, to get a sense of how spending varies by team. I plotted this separately for batters and pitchers.
+
+```{r}
+battingsalaries <- merge(batting, salaries, by=c("playerID", "yearID", "teamID"))
+avgsal <- battingsalaries %>% group_by(yearID, teamID) %>% summarise(avgsalary = mean(salary))
+
+ggplot(avgsal) + geom_line(aes(x=yearID, y=avgsalary, color=teamID)) + labs(x = "Year", y = "Average Salary", title = "Average Batter Salaries by Team and Year")
+
+totalsal <- battingsalaries %>% group_by(yearID, teamID) %>% summarise(totalsalary = sum(salary))
+ggplot(totalsal) + geom_line(aes(x=yearID, y=totalsalary, color=teamID)) + labs(x = "Year", y = "Total Spending", title = "Total Team Spending on Batters by Year")
+```
+
+It can be seen from these plots that the variation in spending among teams has increased greatly over the past 30 or so years, and that the amount that is spent by many teams changes drastically from year to year.
+
+```{r}
+pitchingsalaries <- merge(pitching, salaries, by=c("playerID", "yearID", "teamID"))
+avgsalp <- pitchingsalaries %>% group_by(yearID, teamID) %>% summarise(avgsalary = mean(salary))
+ggplot(avgsalp) + geom_line(aes(x=yearID, y=avgsalary, color=teamID))  + labs(x = "Year", y = "Average Salary", title = "Average Pitcher Salaries by Team and Year")
+
+totalsalp <- pitchingsalaries %>% group_by(yearID, teamID) %>% summarise(totalsalary = sum(salary))
+ggplot(totalsalp) + geom_line(aes(x=yearID, y=totalsalary, color=teamID))  + labs(x = "Year", y = "Total Spending", title = "Total Team Spending on Pitchers by Year")
+```
+
+A similar trend can be seen for pitcher salaries.  
+
+**Models**
+
+First, I fit a model for salaries for players using batting and fielding statistics. I filtered out any players who had not played more than 70 games because their statistics are not as meaningful. Because of the variation in spending by team, I used team as a random effect which I confirmed using an exact likelihood ratio test. Because of the difference in scale between salary and the other variables, I used log salary as the response variable. This  
+
+```{r}
+battingclean <- batting %>% filter(G > 70) %>% dplyr::select (yearID, playerID, teamID, lgID, G, AB, H, SO, HR, RBI, SB, BB, AVG, SLG, OBP, OPS, debutyear, age)
+b <- merge(battingclean, salaries, by = c("playerID", "yearID", "teamID"))
+bf <- merge(b, fielding, by=c("playerID", "yearID", "teamID"))
+bf <- bf %>% filter(salary >0, POS != "P")
+sal.fit <- lmer(log(salary) ~ (1|teamID) + yearID + HR + SO + AB + G.x + PO + E + POS + OPS, data = bf)
+display(sal.fit)
+exactRLRT(sal.fit)
+```
+Based on the residual plot for this model, it appears that it is a good fit. Looking at the confidence intervals: year, HR, SO, AB, G, PO, E, OPS, and some positions are significant. An increase in year, HR, AB, and PO increase the log salary, and an increase in SO, G, and E decrease log salary. This is the expected relationship for most-- HR (home runs) and PO (put-outs) are statistics that players want to be higher, and E (erros) and SO (strikeouts) are statistics that players want to be higher. Additionally, a higher number for AB (at bats) indicates that a player plays more often as so is probably more highly valued by his team. The positions are being compared to a first baseman, and second basemen, catchers, and short stops have lower log salaries compared to a first baseman. Because first base is not one of the more difficult field positions, first basemen are usually players who can hit for power but aren't as good in the field. Power hitters tend to be valued highly by teams so it makes sense that they would have higher salaries.
+
+```{r}
+confint(sal.fit)
+plot(sal.fit, which = 1)
+```
+
+For pitchers, I filtered out any players who had not pitched more than 65 outs because their statistics are not as meaningful. I again used team as a random effect which I confirmed using an exact likelihood ratio test, and used log salary as the response variable.
+
+```{r}
+pitchingclean <- pitching %>% filter(IPouts > 65) %>% dplyr::select(yearID, playerID, teamID, lgID, G, GS, IPouts, H, ER, SO, BB, BAOpp, ERA, WHIP)
+p <- merge(pitchingclean, salaries, by = c("playerID", "yearID", "teamID"))
+p.fit <- lmer(log(salary) ~ (1|teamID) + yearID + IPouts + SO + BB + ERA + WHIP, data = p)
+display(p.fit)
+exactRLRT(p.fit)
+plot(p.fit, which=1)
+```
+
+The residual plot seems to confirm that this is a good fit. Based on the confidence intervals below, we can see that increases in year, outs pitched, strikeouts, and ERA are associated with an increase in salary while an increase in walks is associated with a decrease in salary. The direction of the relationship is to be expected for all but ERA-- a higher ERA means that a pitcher gives up more runs. However, this effect could be due to the fact that starting pitchers tend to give up more runs than relievers because they are in the game for much longer, but because they play for so much longer they tend to be more valued and thus more highly paid than relievers.  
+
+```{r}
+confint(p.fit)
+```
+
+#Team Performance
+
+
+```{r}
+#generating additional team stats-- these are the same stats used for batters but now calculated at a team level
+teams$winpct <- teams$W / teams$G
+teams$X1B <- teams$H - (teams$X2B + teams$X3B + teams$HR)
+teams$AVG <- teams$H/teams$AB
+teams$SLG <- ((teams$X1B) + (2 * teams$X2B) + (3 * teams$X3B) + (4*teams$HR))/teams$AB
+teams$OBP <- (teams$H + teams$BB + teams$HBP) / (teams$AB + teams$BB + teams$HBP + teams$SF)
+teams$OPS <- teams$OBP + teams$SLG
+teams$WHIP <- (teams$BBA + teams$HA)/(teams$IPouts/3)
+teams$XBH <- teams$HR + teams$X2B + teams$X3B
+
+#making an indicator for whether a team made the playoffs in a given year
+teams$playoffs <- NULL
+for (i in 1:2835){
+  teams$playoffs[i] <- ifelse(teams$DivWin[i] %in% "Y"|teams$WCWin[i] %in% "Y"|teams$LgWin[i] %in% "Y", 1, 0)
+}
+teams$prevrank <- rep(0, 2835)
+for (i in 400:2835){
+  team <- teams$teamID[i]
+  year <- teams$yearID[i]
+  lastyear <- teams %>% filter(teamID == team, yearID == (year - 1))
+  teams$prevrank[i] <- lastyear$Rank[1]
+}
+
+teams$playoffs <- as.numeric(teams$playoffs)
+```
+
+**EDA**
+For this part, I wanted to look at what factors are the most predictive of a team making the playoffs. When I fit the model, I found that the only significant variable was the number of wins, which makes sense because making the playoffs is determined by a team's standing in their division, which is determined by a team's number of wins. I made a plot to show the probability of a team making the playoffs at each potential number of wins in the regular season. In any given season, most teams have between 65 and 105 wins, and if a team has 100 wins they will usually make the playoffs. 
+
+```{r}
+playoffs.fit <- glm(playoffs ~ W, family=binomial(link='logit'), data = teams)
+summary(playoffs.fit)
+wins <- data.frame(matrix(nrow = 162, ncol = 1))
+wins <- wins[, c(-1)]
+wins$W <- rep(1:162)
+wins$PlayoffsProb <- predict(playoffs.fit, wins, type = "response")
+plot(playoffs.fit, which=1)
+ggplot(wins, aes(x=W, y=PlayoffsProb)) + geom_line() + geom_vline(xintercept = 65) + geom_vline(xintercept = 100) + geom_vline(xintercept = 105) + labs(x="Wins", y="Probability of Making Playoffs", title = "Probability of Making the Playoffs Based on Number of Wins")
+```
+
+**Model**
+Because a team's chances of making the playoffs are determined by their wins, I developed a model for a team's winning percentage based on team statistics. I used park as a random effect because baseball parks are built differently and have variations in distance of their outfield fences, which can make some parks easier to hit home runs in than others. A exactRLRT test confirmed that park should be treated as a random effect. 
+
+```{r}
+win.fit <- lmer(winpct ~ AVG + OBP + SLG + R + XBH + ERA + RA + WHIP + FP + prevrank + (1|park), data = teams)
+exactRLRT(win.fit)
+display(win.fit)
+plot(win.fit, which = 1)
+```
+The residual plot indicates that this model is a good fit. The confidence intervals below indicate that a team's batting average, on base percentage, slugging percentage, runs scored, extra base hits, ERA, and runs allowed are significant in detrmining win percentage. Increases in OBP, SLG, and R are associated with a higher winning percentage while increases in AVG, XBH, ERA, and RA are associated with a decrease in winning percentage. This relationship makes sense for all statistics except AVG and XBH, which one would expect to be postively associated with winning percentage. 
+
+```{r}
+confint(win.fit)
+```
+
+
+#Predicting a Player's Performance in His Seventh Year  
+When a player is drafted by an MLB team, they are under contract to remain with that team for six years of MLB play, after which they are eligible for free agency. At this point players have more leverage to negotiate their salary and a team has to decide whether or not they want to keep them. Because of this, it is useful for teams to be able to look at a player's performance in their first six years and predict how they will perform in the next year. It would be useful to extend this past the seventh year, but after that point things like decline with age and injuries, which are difficult to quantify, come in to play. For the sake of this project, I will just look at performance in the seventh year.
+
+**Same Season OPS**
+To start off, I will first build a model for a player's OPS based on other performance statistics. I have chosen OPS because it is generally viewed as a good measure of a player's overall batting value, as it combines both how often a player gets on base with how well they hit for power. To check this model, I will calculate a predicted OPS for a player's season and compare that with his actual OPS, to see how well the model is able to predict for a given season.
+
+```{r}
+pred <- data.frame(matrix(nrow = 29237))
+pred$player <- battingclean$playerID
+pred$team <- battingclean$teamID
+pred$year <- battingclean$yearID
+pred <- pred[ , -c(1)]
+ops.fit <- lmer(OPS ~ yearID + HR + AVG + SO + AB + G + (1|teamID), data = battingclean)
+exactRLRT(ops.fit)
+summary(ops.fit)
+plot(ops.fit, which=1)
+pred$actualOPS <- battingclean$OPS
+pred$predictedOPS <- predict(ops.fit, newdata = battingclean, allow.new.levels = TRUE)
+ggplot(pred, aes(x = actualOPS, y = predictedOPS)) + geom_point() + geom_abline(aes(intercept = 0, slope = 1)) + labs(x= "Actual OPS", y = "Predicted OPS", title = "Actual vs Predicted OPS") + theme(legend.position = "none")
+```
+
+The residual plot for this model suggests that it is a pretty good fit. This actual vs predicted plot indicates that the model is able to predict a player's OPS relatively well given his other stats that season, meaning that OPS is pretty highly associated with a player's other statistics.
+
+**Future Season OPS**
+
+I will now build a model to predict a player's OPS in his seventh year based on his aggregate statistcs from his first six years.
+
+```{r}
+first6 <- batting %>% filter(debutyear + 6 >= yearID)
+first6years <- batting %>% filter(yearID < debutyear + 6) %>% group_by(playerID) %>% summarise(H = sum(H),X1B = sum(X1B), X2B = sum(X2B), X3B = sum(X3B), HR = sum(HR), AB = sum(AB), BB = sum(BB), HBP = sum(HBP), SF = sum(SF))
+first6years$SLG <- ((first6years$X1B) + (2 * first6years$X2B) + (3 * first6years$X3B) + (4*first6years$HR))/first6years$AB
+first6years$AVG <- first6years$H / first6years$AB
+first6years$OBP <- (first6years$H + first6years$BB + first6years$HBP) / (first6years$AB + first6years$BB + first6years$HBP + first6years$SF)
+first6years$OPS <- first6years$OBP + first6years$SLG
+first6years$first6OPS <- first6years$OPS
+first6years <- first6years %>% filter(AB > 100)
+
+year7 <- batting %>% filter(yearID == debutyear + 7, AB > 100)
+year7$year7OPS <- year7$OPS
+y7 <- merge(first6, year7[ , c("playerID", "year7OPS")])
+
+fit.7 <- lmer(year7OPS ~ HR + AVG + SO + OPS + G + BB + RBI + age + yearID + (1|teamID), data = y7)
+summary(fit.7)
+exactRLRT(fit.7)
+confint(fit.7)
+plot(fit.7, which=1)
+year7$predictedOPS <- predict(fit.7, year7, allow.new.levels = TRUE)
+ggplot(year7, aes(x=OPS, y = predictedOPS)) + geom_point() + geom_abline(aes(intercept = 0, slope = 1)) + labs(x= "Actual OPS", y = "Predicted OPS", title = "Actual vs Predicted Year 7 OPS Based on First 6 Years of MLB Play") + theme(legend.position = "none")
+```
+
+Even though the residual plot indicates that this model is a pretty good fit, the prediction plot suggests otherwise. This is most likely due to the fact that future performance is due to many factors that either aren't in the data I'm using or can't be easily quantified. These factors could potentially include injury, factors associated with moving to a new team such as a change in coaching staff or playing time, being replaced with newer/younger players, and decline with age. 
+
+#Conclusions
+While baseball statistics can be used to relatively accurately model things like salary, winning percentage, and OPS in a given season, it is more difficult to predict performance in the future because there are many external factors that are difficult to quantify. This is also the reason for the debate over how much emphasis should be placed on statistical analysis when making decisions in baseball. Given more time to work on this project, I would look at whether I could predict other statistics in the seventh year, and also look more into pitchers and their performance-- in order to do this I would need to come up with an accurate way to distinguish between starting pitchers and relievers, because they are considered "good" with different levels of certain statistics such as ERA. 
+
+
+
